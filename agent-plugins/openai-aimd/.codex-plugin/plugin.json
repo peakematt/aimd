@@ -1,0 +1,18 @@
+{
+  "name": "openai-aimd",
+  "display_name": "aimd Markdown Skill",
+  "version": "0.1.0",
+  "description": "Skills-only placeholder plugin that teaches agents to use the aimd CLI for safe structural Markdown operations.",
+  "status": "placeholder",
+  "todo": [
+    "Verify the current Codex/OpenAI plugin manifest schema before publishing.",
+    "Confirm whether skills-only plugins should declare skill entry points, package metadata, or marketplace fields differently.",
+    "Replace placeholder fields with the official marketplace shape once verified."
+  ],
+  "skills": [
+    {
+      "name": "aimd",
+      "path": "skills/aimd/SKILL.md"
+    }
+  ]
+}

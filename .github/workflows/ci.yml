@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  format-and-whitespace:
+    name: Format and whitespace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check whitespace
+        run: git diff --check
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Test all targets
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  tag-release:
+    name: Tag release version
+    needs:
+      - format-and-whitespace
+      - rust
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-tagging-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve semver bump from merged PR labels
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "HEAD is already release-tagged; skipping."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          prs="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls")"
+          pr_count="$(jq 'length' <<< "${prs}")"
+
+          if [ "${pr_count}" -eq 0 ]; then
+            echo "No associated PR found for ${GITHUB_SHA}; skipping release tagging."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${pr_count}" -ne 1 ]; then
+            echo "Expected exactly one associated PR for ${GITHUB_SHA}; found ${pr_count}." >&2
+            exit 1
+          fi
+
+          pr_number="$(jq -r '.[0].number' <<< "${prs}")"
+          labels="$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels" --jq '.[].name')"
+          bump_count="$(grep -Exc 'major|minor|patch' <<< "${labels}" || true)"
+
+          if [ "${bump_count}" -ne 1 ]; then
+            echo "PR #${pr_number} must have exactly one release label: major, minor, or patch." >&2
+            echo "Found labels:" >&2
+            printf '%s\n' "${labels}" >&2
+            exit 1
+          fi
+
+          bump="$(grep -Ex 'major|minor|patch' <<< "${labels}")"
+          latest_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+          latest_version="${latest_tag#v}"
+          if [ -z "${latest_tag}" ]; then
+            latest_version="0.0.0"
+          fi
+
+          IFS=. read -r major minor patch <<< "${latest_version}"
+          case "${bump}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+
+          version="${major}.${minor}.${patch}"
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Computed tag ${tag} already exists." >&2
+            exit 1
+          fi
+
+          echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
+          echo "bump=${bump}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Update workspace version
+        if: steps.release.outputs.skip == 'false'
+        shell: bash
+        env:
+          NEXT_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          perl -0pi -e 's/(\[workspace\.package\][\s\S]*?^version = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/m' Cargo.toml
+          cargo check --workspace --all-targets --all-features
+
+      - name: Commit release version and tag
+        if: steps.release.outputs.skip == 'false'
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          PR_NUMBER: ${{ steps.release.outputs.pr_number }}
+          BUMP: ${{ steps.release.outputs.bump }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git diff --quiet -- Cargo.toml Cargo.lock; then
+            git add Cargo.toml Cargo.lock
+            git commit -m "chore: release v${VERSION}"
+          fi
+
+          git tag -a "${TAG}" -m "${TAG}" -m "Release ${TAG} from PR #${PR_NUMBER} (${BUMP})."
+          git push origin HEAD:main
+          git push origin "${TAG}"

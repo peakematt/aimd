@@ -1,0 +1,28 @@
+[package]
+name = "aimd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Safe structural Markdown inspection and editing CLI for agents and humans."
+readme = "../../README.md"
+
+[dependencies]
+aimd-core.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "aimd"
+path = "src/main.rs"
+
+[dev-dependencies]
+assert_cmd = "2.1.1"
+predicates = "3.1.3"
+tempfile.workspace = true
