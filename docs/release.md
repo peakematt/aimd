@@ -44,7 +44,14 @@ The musl target is intentionally attempted from v0. If linking or dependency fri
 
 Each archive includes the `aimd` binary, `README.md`, and `LICENSE`. The workflow also creates `checksums.txt` with SHA256 checksums for every archive.
 
-Tag-triggered runs upload the release bundle as GitHub Actions artifacts. Creating or updating the GitHub Release is a separate manual `workflow_dispatch` path with `publish_github_release` set to `true`; the job targets the `github-release` environment and creates a draft release.
+The release workflow also publishes agent-skill archives:
+
+- `aimd-agent-skill-vX.Y.Z.tar.gz`
+- `aimd-agent-skill-vX.Y.Z.zip`
+
+Each skill archive contains one top-level `aimd/` skill folder with `SKILL.md`, an install helper, and skill installation notes. This gives humans and agents a stable URL they can download, inspect, install, and test without copying skill text out of the repository.
+
+Tag-triggered runs upload the release bundle as GitHub Actions artifacts and create or update the public GitHub Release with those assets. Manual `workflow_dispatch` runs can still package an existing tag; when `publish_github_release` is enabled manually, the workflow creates a draft release for review.
 
 ## Manual Release Checklist
 
@@ -71,9 +78,8 @@ Tag-triggered runs upload the release bundle as GitHub Actions artifacts. Creati
 
 4. Confirm the PR has exactly one release label: `major`, `minor`, or `patch`.
 5. Merge the PR and let CI create the version tag after validation passes.
-6. Review the release workflow artifacts and `checksums.txt`.
-7. If approved, run the release workflow manually for the same tag with `publish_github_release` enabled. Review and publish the generated draft GitHub Release.
-8. Publish crates to crates.io only after explicit approval:
+6. Review the generated GitHub Release assets and `checksums.txt`.
+7. Publish crates to crates.io only after explicit approval:
 
    ```bash
    cargo publish -p aimd-core

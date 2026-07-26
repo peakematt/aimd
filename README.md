@@ -60,6 +60,15 @@ Report structural hazards such as duplicate exact paths, skipped heading levels,
 
 The canonical first-party skill lives at `agent-skills/aimd/SKILL.md`.
 
+Versioned releases include installable skill archives:
+
+```text
+aimd-agent-skill-vX.Y.Z.tar.gz
+aimd-agent-skill-vX.Y.Z.zip
+```
+
+Each archive contains an inspectable `aimd/SKILL.md` plus `aimd/install.sh` for installing into local Codex and Claude Code skill directories. See `docs/agent-skill-installation.md`.
+
 Best-effort wrapper scaffolds are included for agent surfaces that support plugin-style skill distribution:
 
 - Codex/OpenAI placeholder: `agent-plugins/openai-aimd/`
