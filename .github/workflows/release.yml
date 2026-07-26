@@ -1,0 +1,246 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to package"
+        required: true
+        type: string
+      publish_github_release:
+        description: "Create/update the GitHub Release and upload assets"
+        required: true
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: aimd
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must match vX.Y.Z; got ${tag}" >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Test all targets
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check whitespace
+        run: git diff --check
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            builder: cargo
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            builder: cargo
+            musl: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            builder: cross
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            builder: cargo
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            builder: cargo
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            builder: cargo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.musl == true
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        run: cargo install cross --locked
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.builder }}" = "cross" ]; then
+            cross build --release --bin "${BIN_NAME}" --target "${{ matrix.target }}"
+          else
+            cargo build --release --bin "${BIN_NAME}" --target "${{ matrix.target }}"
+          fi
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          target="${{ matrix.target }}"
+          artifact="${BIN_NAME}-${tag}-${target}"
+          staging="dist/${artifact}"
+          mkdir -p "${staging}"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${target}/release/${BIN_NAME}.exe" "${staging}/"
+          else
+            cp "target/${target}/release/${BIN_NAME}" "${staging}/"
+          fi
+          cp README.md LICENSE "${staging}/"
+
+          (
+            cd dist
+            if [ "${{ matrix.archive }}" = "zip" ]; then
+              7z a "${artifact}.zip" "${artifact}"
+            else
+              tar -czf "${artifact}.tar.gz" "${artifact}"
+            fi
+          )
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ needs.validate.outputs.tag }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  checksums:
+    name: Generate checksums
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Upload checksums artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-${{ needs.validate.outputs.tag }}
+          path: dist/checksums.txt
+          if-no-files-found: error
+
+      - name: Upload full release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ needs.validate.outputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub Release
+    needs:
+      - validate
+      - checksums
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true
+    runs-on: ubuntu-latest
+    environment: github-release
+    permissions:
+      contents: write
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ needs.validate.outputs.tag }}
+          path: dist
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          draft: true
+          prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
+          generate_release_notes: true
+          files: dist/*
