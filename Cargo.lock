@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "aimd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aimd-core",
  "assert_cmd",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "aimd-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
