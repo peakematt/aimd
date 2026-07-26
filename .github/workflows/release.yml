@@ -184,11 +184,50 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  skill-package:
+    name: Package agent skill
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Build skill archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          artifact="aimd-agent-skill-${tag}"
+          staging="dist/${artifact}/aimd"
+          mkdir -p "${staging}"
+
+          cp agent-skills/aimd/SKILL.md "${staging}/SKILL.md"
+          cp scripts/install-agent-skill.sh "${staging}/install.sh"
+          cp docs/agent-skill-installation.md "${staging}/README.md"
+
+          (
+            cd "dist/${artifact}"
+            tar -czf "../${artifact}.tar.gz" aimd
+            python3 -m zipfile -c "../${artifact}.zip" aimd
+          )
+
+      - name: Upload agent skill artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aimd-agent-skill-${{ needs.validate.outputs.tag }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
   checksums:
     name: Generate checksums
     needs:
       - validate
       - build
+      - skill-package
     runs-on: ubuntu-latest
     steps:
       - name: Download release artifacts
@@ -224,9 +263,8 @@ jobs:
     needs:
       - validate
       - checksums
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true)
     runs-on: ubuntu-latest
-    environment: github-release
     permissions:
       contents: write
     steps:
@@ -240,7 +278,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate.outputs.tag }}
-          draft: true
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
           generate_release_notes: true
           files: dist/*
