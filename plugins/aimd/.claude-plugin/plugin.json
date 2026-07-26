@@ -1,0 +1,17 @@
+{
+  "name": "aimd",
+  "version": "0.1.0",
+  "description": "Placeholder Claude Code plugin metadata for the aimd structural Markdown skill.",
+  "status": "placeholder",
+  "todo": [
+    "Verify the current Claude Code plugin and marketplace manifest schema before publishing.",
+    "Confirm expected fields for skills, commands, author metadata, repository URLs, and marketplace names.",
+    "Replace this best-effort metadata with the official layout once verified."
+  ],
+  "skills": [
+    {
+      "name": "aimd",
+      "path": "skills/aimd/SKILL.md"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "aimd",
+  "display_name": "aimd Markdown Skill",
+  "description": "Best-effort placeholder marketplace entry for installing the aimd skill in Claude Code.",
+  "status": "placeholder",
+  "todo": [
+    "The planning spec mentions a repository-level .claude-plugin/marketplace.json, but this scaffold keeps files inside plugins/ because the current ownership scope excludes root .claude-plugin/.",
+    "Verify whether Claude Code expects this file at the repository root before publishing."
+  ],
+  "plugins": [
+    {
+      "name": "aimd",
+      "path": "plugins/aimd"
+    }
+  ]
+}
