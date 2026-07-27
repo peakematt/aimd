@@ -11,6 +11,10 @@ const DUPLICATE_CHILD_HEADINGS: &str =
 const H6_BOUNDARY: &str = include_str!("../../../fixtures/input/h6-boundary.md");
 const REPLACE_SHALLOW: &str = include_str!("../../../fixtures/expected/replace-shallow.md");
 const APPEND_CHILD_AFTER: &str = include_str!("../../../fixtures/expected/append-child-after.md");
+const FM_BLOCK_MAP: &str = "---\nplay_status:\n  - planned\nbandwidth_categories:\n  continuity: 2\n  route: 3\n  session: 1\n  time: 2\nib_session_ready: false\n---\n\n# Game\nBody.\n";
+const FM_FLOW_MAP: &str =
+    "---\nbandwidth_categories: { continuity: 2, route: 3, session: 1, time: 2 }\n---\n\n# Game\n";
+const FM_SCHEMA: &str = "name: game-note\nversion: 1\nfields:\n  play_status:\n    type: list\n    required: true\n    order: 10\n  ib_session_ready:\n    type: bool\n    required: true\n    order: 20\n  bandwidth_categories:\n    type: map\n    style: block\n    required: true\n    order: 30\n    fields:\n      continuity:\n        type: int\n";
 
 fn aimd() -> Command {
     Command::cargo_bin("aimd").unwrap()
@@ -406,4 +410,254 @@ fn completions_generate_shell_script() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_aimd"));
+}
+
+#[test]
+fn fm_get_reports_nested_map_properties_as_json() {
+    let (_dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "get",
+            path.to_str().unwrap(),
+            "bandwidth_categories.continuity",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"path\": ["))
+        .stdout(predicate::str::contains("\"bandwidth_categories\""))
+        .stdout(predicate::str::contains("\"continuity\""))
+        .stdout(predicate::str::contains("\"value\": 2"));
+}
+
+#[test]
+fn fm_set_nested_map_entry_preserves_siblings() {
+    let (_dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "bandwidth_categories.continuity",
+            "--int",
+            "5",
+        ])
+        .assert()
+        .success();
+
+    let updated = fs::read_to_string(path).unwrap();
+    assert!(updated.contains("  continuity: 5"));
+    assert!(updated.contains("  route: 3"));
+    assert!(updated.contains("# Game\nBody."));
+}
+
+#[test]
+fn fm_set_map_file_replaces_entire_map_with_block_style() {
+    let (dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+    let payload = dir.path().join("map.yaml");
+    fs::write(&payload, "continuity: 7\nroute: 4\nsession: 2\n").unwrap();
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "bandwidth_categories",
+            "--map-file",
+            payload.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let updated = fs::read_to_string(path).unwrap();
+    assert!(updated.contains("bandwidth_categories:\n  continuity: 7\n  route: 4\n  session: 2\n"));
+    assert!(!updated.contains("  time: 2"));
+}
+
+#[test]
+fn fm_set_map_accepts_inline_yaml_flow_map() {
+    let (_dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "bandwidth_categories",
+            "--map",
+            "{ continuity: 7, route: 4 }",
+        ])
+        .assert()
+        .success();
+
+    let updated = fs::read_to_string(path).unwrap();
+    assert!(updated.contains("bandwidth_categories:\n  continuity: 7\n  route: 4\n"));
+    assert!(!updated.contains("  time: 2"));
+}
+
+#[test]
+fn fm_list_item_append_and_remove_preserve_list_shape() {
+    let (_dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "append-list-item",
+            path.to_str().unwrap(),
+            "play_status",
+            "planned",
+            "active",
+        ])
+        .assert()
+        .success();
+
+    let updated = fs::read_to_string(&path).unwrap();
+    assert_eq!(updated.matches("  - planned").count(), 1);
+    assert!(updated.contains("  - active"));
+
+    aimd()
+        .args([
+            "fm",
+            "remove-list-item",
+            path.to_str().unwrap(),
+            "play_status",
+            "planned",
+        ])
+        .assert()
+        .success();
+
+    let updated = fs::read_to_string(path).unwrap();
+    assert!(!updated.contains("  - planned"));
+    assert!(updated.contains("  - active"));
+}
+
+#[test]
+fn fm_create_inserts_frontmatter_block() {
+    let (_dir, path) = write_temp("plain.md", "# Game\nBody.\n");
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "ib_session_ready",
+            "--bool",
+            "true",
+            "--create",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "---\nib_session_ready: true\n---\n\n# Game\nBody.\n"
+    );
+}
+
+#[test]
+fn fm_schema_check_reports_required_and_type_mismatches() {
+    let (dir, path) = write_temp("game.md", "---\nplay_status: planned\n---\n\n# Game\n");
+    let schema = dir.path().join("schema.yaml");
+    fs::write(&schema, FM_SCHEMA).unwrap();
+
+    aimd()
+        .args([
+            "fm",
+            "check",
+            path.to_str().unwrap(),
+            "--schema",
+            schema.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("frontmatter_schema_type_mismatch"))
+        .stdout(predicate::str::contains("frontmatter_required_key_missing"));
+}
+
+#[test]
+fn fm_flow_map_reads_but_nested_mutation_fails_safely() {
+    let (_dir, path) = write_temp("flow.md", FM_FLOW_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "get",
+            path.to_str().unwrap(),
+            "bandwidth_categories.continuity",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"value\": 2"));
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "bandwidth_categories.continuity",
+            "--int",
+            "4",
+            "--stdout",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsafe_frontmatter_rewrite"));
+}
+
+#[test]
+fn fm_dry_run_prints_diff_and_does_not_mutate() {
+    let (_dir, path) = write_temp("game.md", FM_BLOCK_MAP);
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "ib_session_ready",
+            "--bool",
+            "true",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-ib_session_ready: false"))
+        .stdout(predicate::str::contains("+ib_session_ready: true"));
+
+    assert!(
+        fs::read_to_string(path)
+            .unwrap()
+            .contains("ib_session_ready: false")
+    );
+}
+
+#[test]
+fn fm_normalize_inserts_required_schema_fields() {
+    let (dir, path) = write_temp("game.md", "---\nplay_status:\n  - planned\n---\n\n# Game\n");
+    let schema = dir.path().join("schema.yaml");
+    fs::write(&schema, FM_SCHEMA).unwrap();
+
+    aimd()
+        .args([
+            "fm",
+            "normalize",
+            path.to_str().unwrap(),
+            "--schema",
+            schema.to_str().unwrap(),
+            "--stdout",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ib_session_ready: false"))
+        .stdout(predicate::str::contains("bandwidth_categories:\n"));
+
+    assert!(
+        !fs::read_to_string(path)
+            .unwrap()
+            .contains("ib_session_ready")
+    );
 }
