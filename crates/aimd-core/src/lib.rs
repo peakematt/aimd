@@ -1,3 +1,9 @@
+mod frontmatter_ops;
+
+pub use frontmatter_ops::{
+    FmCheck, FmMutation, FmProperty, FmSchema, FmSetValue, FmValueKind, PropertyPath,
+};
+
 use serde::Serialize;
 use std::collections::HashMap;
 use thiserror::Error;

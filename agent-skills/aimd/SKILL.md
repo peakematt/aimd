@@ -1,11 +1,11 @@
 ---
 name: aimd
-description: Safe structural Markdown inspection and editing with the aimd CLI. Use when Codex or another agent needs to outline Markdown, select exact heading paths, read sections, replace shallow bodies or full subtrees, append body content, append child sections, or validate structural hazards without fuzzy search or semantic Obsidian parsing.
+description: Safe structural Markdown and frontmatter inspection/editing with the aimd CLI. Use when Codex or another agent needs to outline Markdown, select exact heading paths, read or mutate sections, edit Obsidian-style frontmatter properties, update lists/maps, or validate structural hazards without fuzzy search or semantic Obsidian parsing.
 ---
 
 # aimd
 
-Use `aimd` for scoped Markdown edits by heading structure. Treat it as structural tooling: it preserves source text where possible, treats frontmatter as metadata, and does not perform fuzzy search, semantic Obsidian parsing, summarization, embeddings, or project-wide indexing.
+Use `aimd` for scoped Markdown edits by heading structure and explicit frontmatter property operations. Treat it as structural tooling: it preserves source text where possible, treats frontmatter as metadata for heading operations, and does not perform fuzzy search, semantic Obsidian parsing, summarization, embeddings, or project-wide indexing.
 
 The command contract is still pre-release. Before relying on examples, run `aimd --help` and the relevant subcommand `--help` to confirm the installed binary matches this skill.
 
@@ -17,6 +17,7 @@ The command contract is still pre-release. Before relying on examples, run `aimd
 4. Read before writing. Prefer `get --shallow` before `replace --shallow` when editing direct body text.
 5. Preview important edits with `--dry-run` or `--stdout`; use `--backup` before mutating important files.
 6. Stop on ambiguity errors. Do not guess between duplicate section paths or duplicate child headings.
+7. Use `aimd fm ...` for document-start YAML frontmatter. Do not edit frontmatter with heading-path commands or ad hoc regexes.
 
 ## Command Patterns
 
@@ -76,6 +77,42 @@ Validate:
 aimd check docs/project.md --json
 ```
 
+Read frontmatter properties:
+
+```bash
+aimd fm get docs/project.md --json
+aimd fm get docs/project.md play_status --json
+aimd fm get docs/project.md bandwidth_categories.continuity --json
+```
+
+Edit typed frontmatter values:
+
+```bash
+aimd fm set docs/project.md ib_session_ready --bool true --dry-run
+aimd fm set docs/project.md last_played --date 2026-07-27 --dry-run
+aimd fm set docs/project.md bandwidth_categories.continuity --int 3 --dry-run
+aimd fm set docs/project.md bandwidth_categories --map-file /tmp/bandwidth.yaml --dry-run
+```
+
+Edit frontmatter lists:
+
+```bash
+aimd fm set-list docs/project.md play_status planned --dry-run
+aimd fm append-list-item docs/project.md ib_challenges "[[Backlog Blitz v3]]" --dry-run
+aimd fm remove-list-item docs/project.md ib_challenges "[[Old Challenge]]" --dry-run
+```
+
+Use `set-list` to replace the whole list. Use `append-list-item` and `remove-list-item` to add or remove matching list values.
+
+Check and normalize with a schema:
+
+```bash
+aimd fm check docs/project.md --schema schemas/game-note.yaml --json
+aimd fm normalize docs/project.md --schema schemas/game-note.yaml --dry-run
+```
+
+Flow-style YAML maps can be read and checked, but nested flow-map mutation may fail with `unsafe_frontmatter_rewrite`. Replace the whole map with `--map-file` when that is intentional.
+
 ## Synthetic Example Shape
 
 Use public, synthetic examples like this when demonstrating or testing the skill:
@@ -107,6 +144,10 @@ Never use private notes, account data, proprietary documentation, personal logs,
 - `duplicate_child_heading`: use `--after-child` or `--before-child` indexes from JSON output.
 - `invalid_child_index`: rerun `outline --json --root <path>` and use the current direct-child index.
 - `missing_content` or `conflicting_content_inputs`: provide exactly one content source.
+- `frontmatter_missing`: use `--create` only when inserting a new document-start frontmatter block is intended.
+- `frontmatter_property_not_found`: run `aimd fm get <file> --json` and select an existing property path, or use `--create` on supported writes.
+- `frontmatter_schema_type_mismatch`: change the command/value type or update the schema before writing.
+- `invalid_frontmatter_value`: provide a scalar/list/map value matching the command shape.
 - `unsafe_rewrite`, `parse_error`, or `io_error`: stop, preserve the file, and inspect diagnostics before retrying.
 
 ## Review Step
@@ -120,5 +161,8 @@ aimd get --help
 aimd replace --help
 aimd append --help
 aimd append-child --help
+aimd fm --help
+aimd fm set --help
+aimd fm append-list-item --help
 aimd check --help
 ```
