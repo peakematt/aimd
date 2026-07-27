@@ -278,7 +278,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate.outputs.tag }}
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish_github_release }}
           prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
           generate_release_notes: true
           files: dist/*

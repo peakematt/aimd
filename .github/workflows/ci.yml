@@ -79,6 +79,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
+      actions: write
       pull-requests: read
     steps:
       - name: Checkout
@@ -90,7 +91,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Resolve semver bump from merged PR labels
+      - name: Resolve release tag from merged PR labels
         id: release
         shell: bash
         env:
@@ -122,6 +123,12 @@ jobs:
           pr_number="$(jq -r '.[0].number' <<< "${prs}")"
           labels="$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels" --jq '.[].name')"
           bump_count="$(grep -Exc 'major|minor|patch' <<< "${labels}" || true)"
+
+          if [ "${bump_count}" -eq 0 ]; then
+            echo "PR #${pr_number} has no release label; skipping release tagging."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
           if [ "${bump_count}" -ne 1 ]; then
             echo "PR #${pr_number} must have exactly one release label: major, minor, or patch." >&2
@@ -160,23 +167,22 @@ jobs:
             exit 1
           fi
 
+          workspace_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "aimd") | .version' \
+            | head -n1)"
+          if [ "${workspace_version}" != "${version}" ]; then
+            echo "PR #${pr_number} ${bump} bump computes ${version}, but Cargo.toml is ${workspace_version}." >&2
+            echo "Bump the workspace version in the PR instead of letting CI commit to protected main." >&2
+            exit 1
+          fi
+
           echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
           echo "bump=${bump}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "skip=false" >> "${GITHUB_OUTPUT}"
 
-      - name: Update workspace version
-        if: steps.release.outputs.skip == 'false'
-        shell: bash
-        env:
-          NEXT_VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          perl -0pi -e 's/(\[workspace\.package\][\s\S]*?^version = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/m' Cargo.toml
-          cargo check --workspace --all-targets --all-features
-
-      - name: Commit release version and tag
+      - name: Create release tag
         if: steps.release.outputs.skip == 'false'
         shell: bash
         env:
@@ -189,11 +195,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if ! git diff --quiet -- Cargo.toml Cargo.lock; then
-            git add Cargo.toml Cargo.lock
-            git commit -m "chore: release v${VERSION}"
-          fi
-
           git tag -a "${TAG}" -m "${TAG}" -m "Release ${TAG} from PR #${PR_NUMBER} (${BUMP})."
-          git push origin HEAD:main
           git push origin "${TAG}"
+
+      - name: Dispatch release workflow
+        if: steps.release.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f tag="${TAG}" \
+            -f publish_github_release=true
