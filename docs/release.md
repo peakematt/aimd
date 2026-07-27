@@ -17,7 +17,7 @@ The Rust checks run on Linux, macOS, and Windows. Formatting and whitespace chec
 
 ## Automatic Version Tags
 
-After a PR is merged to `main`, `.github/workflows/ci.yml` reruns the validation suite. If validation passes, the `Tag release version` job finds the merged PR associated with the pushed commit and requires exactly one SemVer label:
+After a PR is merged to `main`, `.github/workflows/ci.yml` reruns the validation suite. If validation passes, the `Tag release version` job finds the merged PR associated with the pushed commit. PRs without a SemVer label skip release tagging. PRs that should release need exactly one SemVer label:
 
 - `major`
 - `minor`
@@ -25,9 +25,9 @@ After a PR is merged to `main`, `.github/workflows/ci.yml` reruns the validation
 
 The job computes the next version from the latest `vX.Y.Z` tag. If no release tag exists yet, it starts from `v0.0.0`, so a `minor` label produces `v0.1.0`.
 
-When the computed version differs from the workspace version in `Cargo.toml`, CI updates the workspace version, refreshes `Cargo.lock`, commits `chore: release vX.Y.Z` to `main`, and tags that release commit. If the workspace already has the computed version, CI tags the merge commit directly.
+The release version must already be checked into the merged PR. CI verifies that the computed version matches `Cargo.toml`, tags the merge commit, and dispatches the release workflow. CI does not commit release bumps directly to `main`, so protected branch rules can require all changes to go through pull requests.
 
-PRs without exactly one release label fail the release-tagging job after tests pass. Add the release label before merging so version tags are deterministic.
+PRs with more than one release label fail the release-tagging job after tests pass. Add exactly one release label before merging any PR that should produce a versioned release.
 
 ## Tag Packaging
 
@@ -51,7 +51,7 @@ The release workflow also publishes agent-skill archives:
 
 Each skill archive contains one top-level `aimd/` skill folder with `SKILL.md`, an install helper, and skill installation notes. This gives humans and agents a stable URL they can download, inspect, install, and test without copying skill text out of the repository.
 
-Tag-triggered runs upload the release bundle as GitHub Actions artifacts and create or update the public GitHub Release with those assets. Manual `workflow_dispatch` runs can still package an existing tag; when `publish_github_release` is enabled manually, the workflow creates a draft release for review.
+Tag-triggered runs upload the release bundle as GitHub Actions artifacts and create or update the public GitHub Release with those assets. Manual `workflow_dispatch` runs can still package an existing tag; when `publish_github_release` is disabled manually, the workflow creates a draft release for review.
 
 ## Manual Release Checklist
 
@@ -76,7 +76,7 @@ Tag-triggered runs upload the release bundle as GitHub Actions artifacts and cre
 
    The `aimd` package depends on `aimd-core` by version for crates.io packaging. Before `aimd-core` exists on crates.io, a full `aimd` dry run may fail dependency resolution; the release order is core first, then CLI.
 
-4. Confirm the PR has exactly one release label: `major`, `minor`, or `patch`.
+4. Confirm the PR has exactly one release label when it should publish a release: `major`, `minor`, or `patch`.
 5. Merge the PR and let CI create the version tag after validation passes.
 6. Review the generated GitHub Release assets and `checksums.txt`.
 7. Publish crates to crates.io only after explicit approval:
