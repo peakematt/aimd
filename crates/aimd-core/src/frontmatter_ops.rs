@@ -2,6 +2,7 @@ use crate::{AimdError, Diagnostic, DiagnosticSeverity, Document, Frontmatter, Mu
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use yaml_rust2::YamlLoader;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FmCheck {
@@ -161,6 +162,7 @@ impl Document {
             });
         };
         let parsed = parse_frontmatter_block(&self.source, &block);
+        diagnostics.extend(yaml_syntax_diagnostics(&self.source, &block));
         diagnostics.extend(parsed.diagnostics.clone());
         if let Some(schema) = schema {
             diagnostics.extend(schema_diagnostics(&parsed, schema));
@@ -667,6 +669,27 @@ fn parse_frontmatter_block(source: &str, block: &FmBlock) -> ParsedFrontmatter {
     ParsedFrontmatter { props, diagnostics }
 }
 
+fn yaml_syntax_diagnostics(source: &str, block: &FmBlock) -> Vec<Diagnostic> {
+    let content = &source[block.content_start..block.content_end];
+    match YamlLoader::load_from_str(content) {
+        Ok(_) => Vec::new(),
+        Err(error) => {
+            let marker = error.marker();
+            vec![diagnostic(
+                "invalid_yaml_frontmatter",
+                &format!(
+                    "Frontmatter is not valid YAML at column {}: {}",
+                    marker.col(),
+                    error.info()
+                ),
+                Some(block.line_start + marker.line()),
+                None,
+                DiagnosticSeverity::Error,
+            )]
+        }
+    }
+}
+
 fn parse_prop(
     key: &str,
     inline: &str,
@@ -936,6 +959,9 @@ fn render_set_value(key: &str, value: &FmSetValue, newline: &str) -> Result<Stri
 }
 
 fn render_list(key: &str, values: &[String], newline: &str) -> String {
+    if values.is_empty() {
+        return format!("{key}: []{newline}");
+    }
     let mut output = format!("{key}:{newline}");
     for value in values {
         output.push_str("  - ");
@@ -969,18 +995,45 @@ fn render_json_inline_value(value: &Value) -> String {
 }
 
 fn quote_yaml_string(value: &str) -> String {
-    if value.is_empty()
-        || value != value.trim()
+    if yaml_plain_scalar_needs_quotes(value) {
+        serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+    } else {
+        value.to_string()
+    }
+}
+
+fn yaml_plain_scalar_needs_quotes(value: &str) -> bool {
+    let Some(first) = value.chars().next() else {
+        return true;
+    };
+    let starts_like_collection_item = value
+        .strip_prefix(['-', '?'])
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+    value != value.trim()
+        || value.chars().any(char::is_control)
         || value.contains(':')
         || value.contains('#')
         || value.contains("[[")
         || matches!(value, "true" | "false" | "null" | "~")
         || looks_like_date(value)
-    {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
+        || starts_like_collection_item
+        || matches!(
+            first,
+            '!' | '&'
+                | '*'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | ','
+                | '|'
+                | '>'
+                | '@'
+                | '`'
+                | '"'
+                | '\''
+                | '%'
+        )
 }
 
 fn strip_yaml_quotes(value: &str) -> String {
@@ -1191,7 +1244,7 @@ fn insertion_byte(
 fn render_schema_placeholder(field: &FmSchemaField, newline: &str) -> String {
     let key = field.path.last().cloned().unwrap_or_default();
     match field.kind {
-        FmValueKind::List => format!("{key}:{newline}"),
+        FmValueKind::List => format!("{key}: []{newline}"),
         FmValueKind::Map => format!("{key}:{newline}"),
         FmValueKind::Bool => format!("{key}: false{newline}"),
         FmValueKind::Int => format!("{key}: 0{newline}"),

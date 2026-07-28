@@ -535,6 +535,34 @@ fn fm_list_item_append_and_remove_preserve_list_shape() {
 }
 
 #[test]
+fn fm_set_list_without_values_renders_empty_yaml_list() {
+    let (_dir, path) = write_temp("plain.md", "# Game\nBody.\n");
+
+    aimd()
+        .args([
+            "fm",
+            "set-list",
+            path.to_str().unwrap(),
+            "play_status",
+            "--create",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "---\nplay_status: []\n---\n\n# Game\nBody.\n"
+    );
+
+    aimd()
+        .args(["fm", "get", path.to_str().unwrap(), "play_status", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"list\""))
+        .stdout(predicate::str::contains("\"value\": []"));
+}
+
+#[test]
 fn fm_create_inserts_frontmatter_block() {
     let (_dir, path) = write_temp("plain.md", "# Game\nBody.\n");
 
@@ -555,6 +583,46 @@ fn fm_create_inserts_frontmatter_block() {
         fs::read_to_string(path).unwrap(),
         "---\nib_session_ready: true\n---\n\n# Game\nBody.\n"
     );
+}
+
+#[test]
+fn fm_set_quotes_yaml_indicator_strings() {
+    let (_dir, path) = write_temp("plain.md", "# Game\nBody.\n");
+
+    aimd()
+        .args([
+            "fm",
+            "set",
+            path.to_str().unwrap(),
+            "handle",
+            "--str",
+            "@aidyn",
+            "--create",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "---\nhandle: \"@aidyn\"\n---\n\n# Game\nBody.\n"
+    );
+
+    aimd()
+        .args(["fm", "check", path.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("invalid_yaml_frontmatter").not());
+}
+
+#[test]
+fn fm_check_reports_invalid_yaml_frontmatter() {
+    let (_dir, path) = write_temp("invalid.md", "---\nhandle: @aidyn\n---\n\n# Game\n");
+
+    aimd()
+        .args(["fm", "check", path.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("invalid_yaml_frontmatter"));
 }
 
 #[test]
@@ -653,11 +721,35 @@ fn fm_normalize_inserts_required_schema_fields() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ib_session_ready: false"))
-        .stdout(predicate::str::contains("bandwidth_categories:\n"));
+        .stdout(predicate::str::contains("bandwidth_categories:\n"))
+        .stdout(predicate::str::contains("play_status: []").not());
 
     assert!(
         !fs::read_to_string(path)
             .unwrap()
             .contains("ib_session_ready")
     );
+}
+
+#[test]
+fn fm_normalize_inserts_empty_yaml_list_for_required_lists() {
+    let (dir, path) = write_temp(
+        "game.md",
+        "---\nib_session_ready: false\nbandwidth_categories:\n  continuity: 1\n---\n\n# Game\n",
+    );
+    let schema = dir.path().join("schema.yaml");
+    fs::write(&schema, FM_SCHEMA).unwrap();
+
+    aimd()
+        .args([
+            "fm",
+            "normalize",
+            path.to_str().unwrap(),
+            "--schema",
+            schema.to_str().unwrap(),
+            "--stdout",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("play_status: []"));
 }
