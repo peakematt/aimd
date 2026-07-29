@@ -721,7 +721,7 @@ fn fm_normalize_inserts_required_schema_fields() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ib_session_ready: false"))
-        .stdout(predicate::str::contains("bandwidth_categories:\n"))
+        .stdout(predicate::str::contains("bandwidth_categories: {}"))
         .stdout(predicate::str::contains("play_status: []").not());
 
     assert!(

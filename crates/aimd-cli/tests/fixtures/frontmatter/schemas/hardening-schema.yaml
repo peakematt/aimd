@@ -1,0 +1,20 @@
+name: hardening-note
+version: 1
+fields:
+  play_status:
+    type: list
+    required: true
+    order: 10
+  ib_session_ready:
+    type: bool
+    required: true
+    order: 20
+  bandwidth_categories:
+    type: map
+    required: true
+    order: 30
+    fields:
+      continuity:
+        type: int
+        required: true
+        order: 10

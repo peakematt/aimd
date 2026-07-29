@@ -102,7 +102,7 @@ aimd fm append-list-item docs/project.md ib_challenges "[[Backlog Blitz v3]]" --
 aimd fm remove-list-item docs/project.md ib_challenges "[[Old Challenge]]" --dry-run
 ```
 
-Use `set-list` to replace the whole list. Use `append-list-item` and `remove-list-item` to add or remove matching list values.
+Use `set-list` to replace the whole list. Use `append-list-item` and `remove-list-item` to add or remove matching list values. Appends avoid duplicates by default unless `--allow-duplicate` is supplied. Removal deletes all matching scalar values from a supported list.
 
 Check and normalize with a schema:
 
@@ -113,7 +113,7 @@ aimd fm normalize docs/project.md --schema schemas/game-note.yaml --dry-run
 
 Flow-style YAML maps can be read and checked, but nested flow-map mutation may fail with `unsafe_frontmatter_rewrite`. Replace the whole map with `--map-file` when that is intentional.
 
-`aimd fm` validates generated frontmatter as YAML before writing. It can read and preserve sequence-of-maps shapes, including inline empty lists like `evidence: []`, but it does not support mutation paths inside nested sequences. Avoid editing frontmatter with anchors, aliases, merge keys, custom tags, complex keys, multiline scalars, duplicate keys, or multiple YAML document markers; mutating commands should refuse those with stable diagnostics instead of rewriting them.
+`aimd fm` validates generated frontmatter as YAML before writing. It preserves unrelated body bytes, comments, blank lines, ordering, CRLF line endings, and final-newline policy where the supported source-range model can prove the edit. Schema normalization inserts required lists as `[]`, required maps as `{}` or block maps with required child placeholders, and scalar defaults conservatively. It can read and preserve sequence-of-maps shapes, including inline empty lists like `evidence: []`, but it does not support mutation paths inside nested sequences. Avoid editing frontmatter with anchors, aliases, merge keys, custom tags, complex keys, multiline scalars, duplicate keys, or multiple YAML document markers; mutating commands should refuse those with stable diagnostics instead of rewriting them.
 
 ## Synthetic Example Shape
 
