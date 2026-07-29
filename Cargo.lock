@@ -26,6 +26,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror",
+ "yaml-rust2",
 ]
 
 [[package]]

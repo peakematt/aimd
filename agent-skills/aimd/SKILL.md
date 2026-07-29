@@ -113,6 +113,8 @@ aimd fm normalize docs/project.md --schema schemas/game-note.yaml --dry-run
 
 Flow-style YAML maps can be read and checked, but nested flow-map mutation may fail with `unsafe_frontmatter_rewrite`. Replace the whole map with `--map-file` when that is intentional.
 
+`aimd fm` validates generated frontmatter as YAML before writing. It can read and preserve sequence-of-maps shapes, including inline empty lists like `evidence: []`, but it does not support mutation paths inside nested sequences. Avoid editing frontmatter with anchors, aliases, merge keys, custom tags, complex keys, multiline scalars, duplicate keys, or multiple YAML document markers; mutating commands should refuse those with stable diagnostics instead of rewriting them.
+
 ## Synthetic Example Shape
 
 Use public, synthetic examples like this when demonstrating or testing the skill:
@@ -148,6 +150,10 @@ Never use private notes, account data, proprietary documentation, personal logs,
 - `frontmatter_property_not_found`: run `aimd fm get <file> --json` and select an existing property path, or use `--create` on supported writes.
 - `frontmatter_schema_type_mismatch`: change the command/value type or update the schema before writing.
 - `invalid_frontmatter_value`: provide a scalar/list/map value matching the command shape.
+- `invalid_yaml_frontmatter`: fix the existing frontmatter syntax before attempting a mutation; writes are blocked.
+- `unsupported_yaml_construct`: preserve the file and edit manually or simplify the YAML shape before using `aimd fm` mutation commands.
+- `unsupported_frontmatter_path`: select a supported top-level key or direct child map key; nested sequence item mutation is intentionally refused.
+- `duplicate_frontmatter_key`: remove or reconcile duplicate keys before mutating frontmatter.
 - `unsafe_rewrite`, `parse_error`, or `io_error`: stop, preserve the file, and inspect diagnostics before retrying.
 
 ## Review Step
