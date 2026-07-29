@@ -67,7 +67,7 @@ Report structural hazards such as duplicate exact paths, skipped heading levels,
 
 ### `fm`
 
-Read and mutate document-start YAML frontmatter properties without using approximate line patches. `fm` commands edit only the block between the opening and closing `---` delimiters. They support typed scalar writes, list replacement, list item append/remove, nested map paths, whole-map replacement from JSON or simple YAML, schema-aware checks, and schema-guided normalization.
+Read and mutate document-start YAML frontmatter properties without using approximate line patches. `fm` commands edit only the block between the opening and closing `---` delimiters. They support typed scalar writes, list replacement, list item append/remove, nested map paths, whole-map replacement from JSON or simple YAML, schema-aware checks, and schema-guided normalization. Mutating commands validate the final serialized frontmatter with a YAML parser before writing.
 
 Nested YAML maps are treated as first-class values:
 
@@ -84,6 +84,8 @@ aimd fm set Game.md bandwidth_categories.continuity --int 3 --dry-run
 ```
 
 Flow-style maps can be read and checked, but nested flow-map mutation fails safely when it would require broad reformatting. Use `--map-file` to replace the full map deliberately.
+
+The supported mutation subset is intentionally conservative. `aimd fm` reads and preserves sequence-of-maps frontmatter, including inline empty lists such as `evidence: []`, but it refuses nested sequence mutation paths instead of guessing at a source range. Mutations also refuse valid YAML constructs that are not source-preserving today, including anchors, aliases, merge keys, custom tags, complex keys, multiline scalars, duplicate keys, and multiple YAML document markers.
 
 ## Agent Skill
 
