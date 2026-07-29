@@ -6,7 +6,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/peakematt/aimd"
@@ -14,7 +14,7 @@ readme = "README.md"
 authors = ["Matt Peake"]
 
 [workspace.dependencies]
-aimd-core = { path = "crates/aimd-core", version = "0.2.0" }
+aimd-core = { path = "crates/aimd-core", version = "0.2.1" }
 clap = { version = "4.5.53", features = ["derive", "wrap_help"] }
 clap_complete = "4.5.61"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
@@ -23,3 +23,4 @@ serde_json = "1.0.145"
 similar = "2.7.0"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
+yaml-rust2 = "0.11.0"

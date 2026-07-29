@@ -2,6 +2,7 @@ use crate::{AimdError, Diagnostic, DiagnosticSeverity, Document, Frontmatter, Mu
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use yaml_rust2::YamlLoader;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FmCheck {
@@ -83,6 +84,7 @@ pub enum FmSetValue {
     Date(String),
     Blank,
     Null,
+    List(Vec<String>),
     Map(Value),
 }
 
@@ -96,6 +98,7 @@ impl FmSetValue {
             Self::Date(_) => FmValueKind::Date,
             Self::Blank => FmValueKind::Blank,
             Self::Null => FmValueKind::Null,
+            Self::List(_) => FmValueKind::List,
             Self::Map(_) => FmValueKind::Map,
         }
     }
@@ -161,6 +164,8 @@ impl Document {
             });
         };
         let parsed = parse_frontmatter_block(&self.source, &block);
+        diagnostics.extend(yaml_syntax_diagnostics(&self.source, &block));
+        diagnostics.extend(unsupported_construct_diagnostics(&self.source, &block));
         diagnostics.extend(parsed.diagnostics.clone());
         if let Some(schema) = schema {
             diagnostics.extend(schema_diagnostics(&parsed, schema));
@@ -179,6 +184,22 @@ impl Document {
     ) -> Result<FmCheck, AimdError> {
         let mut check = self.fm_check(schema)?;
         if let Some(path) = path {
+            if path.segments().len() > 2 {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint("Frontmatter property paths support top-level keys and direct child map keys."));
+            }
+            if path.segments().len() == 2
+                && let Some(top) = check
+                    .properties
+                    .iter()
+                    .find(|property| property.path == [path.top()])
+                && top.kind != FmValueKind::Map
+            {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint("Nested property paths require a supported block-style map."));
+            }
             check
                 .properties
                 .retain(|property| property.path == path.segments());
@@ -205,7 +226,7 @@ impl Document {
         validate_schema_write(path, value.kind(), schema)?;
         let rendered = render_set_value(path.top(), &value, &self.newline)?;
         let output = self.write_property(path, &value, &rendered, create, schema)?;
-        Ok(FmMutation { output })
+        self.checked_fm_output(output)
     }
 
     pub fn fm_set_list(
@@ -216,17 +237,19 @@ impl Document {
         schema: Option<&FmSchema>,
     ) -> Result<FmMutation, AimdError> {
         validate_schema_write(path, FmValueKind::List, schema)?;
-        let rendered = render_list(path.top(), values, &self.newline);
+        let rendered = render_set_value(
+            path.top(),
+            &FmSetValue::List(values.to_vec()),
+            &self.newline,
+        )?;
         let output = self.write_property(
             path,
-            &FmSetValue::Map(Value::Array(
-                values.iter().cloned().map(Value::String).collect(),
-            )),
+            &FmSetValue::List(values.to_vec()),
             &rendered,
             create,
             schema,
         )?;
-        Ok(FmMutation { output })
+        self.checked_fm_output(output)
     }
 
     pub fn fm_append_list_item(
@@ -257,6 +280,50 @@ impl Document {
                 ),
             });
         };
+        if path.segments().len() == 2 {
+            if prop.kind != FmValueKind::Map || prop.flow_map {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint(
+                        "Nested list append only supports direct child keys in block-style maps.",
+                    ));
+            }
+            let child_key = &path.segments()[1];
+            let existing_values = if let Some(child) = prop.find_child(child_key) {
+                if child.kind != FmValueKind::List {
+                    return Err(fm_error("frontmatter_schema_type_mismatch")
+                        .selector(path.segments())
+                        .hint("append-list-item requires an existing YAML list or --create."));
+                }
+                child_list_strings(child, path)?
+            } else if create {
+                Vec::new()
+            } else {
+                return Err(fm_error("frontmatter_property_not_found").selector(path.segments()));
+            };
+            let existing = existing_values.iter().cloned().collect::<BTreeSet<_>>();
+            let to_add = values
+                .iter()
+                .filter(|value| allow_duplicate || !existing.contains(*value))
+                .cloned()
+                .collect::<Vec<_>>();
+            if to_add.is_empty() {
+                return Ok(FmMutation {
+                    output: self.source.clone(),
+                });
+            }
+            let mut updated_values = existing_values;
+            updated_values.extend(to_add);
+            let rendered = render_child_list_line(child_key, &updated_values, &self.newline);
+            if let Some(child) = prop.find_child(child_key) {
+                return self.checked_fm_output(self.splice(
+                    child.range_start,
+                    child.range_end,
+                    &rendered,
+                ));
+            }
+            return self.checked_fm_output(self.splice(prop.range_end, prop.range_end, &rendered));
+        }
         if prop.kind != FmValueKind::List {
             return Err(fm_error("frontmatter_schema_type_mismatch")
                 .selector(path.segments())
@@ -277,6 +344,27 @@ impl Document {
                 output: self.source.clone(),
             });
         }
+        if prop.list_items.is_empty() {
+            let existing = prop.value.as_array().ok_or_else(|| {
+                fm_error("unsupported_frontmatter_path").selector(path.segments())
+            })?;
+            if !existing.iter().all(Value::is_string) {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint("append-list-item only supports scalar string lists; replace complex lists with set-list or set --map where appropriate."));
+            }
+            let mut values = existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            values.extend(to_add);
+            return self.checked_fm_output(self.splice(
+                prop.range_start,
+                prop.range_end,
+                &render_list(path.top(), &values, &self.newline),
+            ));
+        }
         let insert_at = prop
             .list_items
             .last()
@@ -287,9 +375,7 @@ impl Document {
             insertion.push_str(&quote_yaml_string(&value));
             insertion.push_str(&self.newline);
         }
-        Ok(FmMutation {
-            output: self.splice(insert_at, insert_at, &insertion),
-        })
+        self.checked_fm_output(self.splice(insert_at, insert_at, &insertion))
     }
 
     pub fn fm_remove_list_item(
@@ -304,21 +390,81 @@ impl Document {
         let prop = parsed
             .find_top(path.top())
             .ok_or_else(|| fm_error("frontmatter_property_not_found").selector(path.segments()))?;
+        if path.segments().len() == 2 {
+            if prop.kind != FmValueKind::Map || prop.flow_map {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint(
+                        "Nested list removal only supports direct child keys in block-style maps.",
+                    ));
+            }
+            let child_key = &path.segments()[1];
+            let child = prop.find_child(child_key).ok_or_else(|| {
+                fm_error("frontmatter_property_not_found").selector(path.segments())
+            })?;
+            if child.kind != FmValueKind::List {
+                return Err(fm_error("frontmatter_schema_type_mismatch")
+                    .selector(path.segments())
+                    .hint("remove-list-item requires an existing YAML list."));
+            }
+            let remove = values.iter().cloned().collect::<BTreeSet<_>>();
+            let kept = child_list_strings(child, path)?
+                .into_iter()
+                .filter(|value| !remove.contains(value))
+                .collect::<Vec<_>>();
+            return self.checked_fm_output(self.splice(
+                child.range_start,
+                child.range_end,
+                &render_child_list_line(child_key, &kept, &self.newline),
+            ));
+        }
         if prop.kind != FmValueKind::List {
             return Err(fm_error("frontmatter_schema_type_mismatch")
                 .selector(path.segments())
                 .hint("remove-list-item requires an existing YAML list."));
         }
+        if prop.list_items.is_empty() {
+            let existing = prop.value.as_array().ok_or_else(|| {
+                fm_error("unsupported_frontmatter_path").selector(path.segments())
+            })?;
+            if !existing.iter().all(Value::is_string) {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint("remove-list-item only supports scalar string lists."));
+            }
+            let remove = values.iter().cloned().collect::<BTreeSet<_>>();
+            let kept = existing
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !remove.contains(*value))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            return self.checked_fm_output(self.splice(
+                prop.range_start,
+                prop.range_end,
+                &render_list(path.top(), &kept, &self.newline),
+            ));
+        }
         let remove = values.iter().cloned().collect::<BTreeSet<_>>();
+        let removed_count = prop
+            .list_items
+            .iter()
+            .filter(|item| remove.contains(&item.value))
+            .count();
+        if removed_count == prop.list_items.len() {
+            return self.checked_fm_output(self.splice(
+                prop.range_start,
+                prop.range_end,
+                &render_list(path.top(), &[], &self.newline),
+            ));
+        }
         let mut output = self.source.clone();
         for item in prop.list_items.iter().rev() {
             if remove.contains(&item.value) {
                 output.replace_range(item.range_start..item.range_end, "");
             }
         }
-        Ok(FmMutation {
-            output: ensure_final_newline(output, &self.newline),
-        })
+        self.checked_fm_output(ensure_final_newline(output, &self.newline))
     }
 
     pub fn fm_remove(
@@ -326,6 +472,11 @@ impl Document {
         path: &PropertyPath,
         schema: Option<&FmSchema>,
     ) -> Result<FmMutation, AimdError> {
+        if path.segments().len() > 2 {
+            return Err(fm_error("unsupported_frontmatter_path")
+                .selector(path.segments())
+                .hint("Nested frontmatter mutation is limited to top-level keys and direct child map keys."));
+        }
         if schema_field(path, schema).is_some_and(|field| field.required) {
             return Err(fm_error("frontmatter_required_key_missing")
                 .selector(path.segments())
@@ -339,42 +490,86 @@ impl Document {
         let (start, end) = if path.segments().len() == 1 {
             (prop.range_start, prop.range_end)
         } else {
+            if prop.kind != FmValueKind::Map || prop.flow_map {
+                return Err(fm_error("unsupported_frontmatter_path")
+                    .selector(path.segments())
+                    .hint("Nested remove only supports direct child keys in block-style maps."));
+            }
             let child = prop.find_child(&path.segments()[1]).ok_or_else(|| {
                 fm_error("frontmatter_property_not_found").selector(path.segments())
             })?;
             (child.range_start, child.range_end)
         };
-        Ok(FmMutation {
-            output: self.splice(start, end, ""),
-        })
+        self.checked_fm_output(self.splice(start, end, ""))
     }
 
     pub fn fm_normalize(&self, schema: &FmSchema) -> Result<FmMutation, AimdError> {
         let block = self.require_mutable_block()?;
         let parsed = parse_frontmatter_block(&self.source, &block);
         let parsed_schema = ParsedSchema::from_schema(schema.clone());
-        let mut output = self.source.clone();
+        let mut insertions = Vec::<(usize, String)>::new();
+        for prop in &parsed.props {
+            if prop.kind != FmValueKind::Map {
+                continue;
+            }
+            let missing_children = parsed_schema
+                .public
+                .fields
+                .iter()
+                .filter(|field| {
+                    field.required
+                        && field.path.len() == 2
+                        && field.path.first().is_some_and(|parent| parent == &prop.key)
+                        && prop.find_child(&field.path[1]).is_none()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing_children.is_empty() {
+                continue;
+            }
+            if prop.flow_map {
+                return Err(fm_error("unsafe_frontmatter_rewrite")
+                    .selector(std::slice::from_ref(&prop.key))
+                    .hint("Flow-style map normalization is not source-preserving; convert it to block style manually."));
+            }
+            let mut insertion = String::new();
+            for field in sorted_schema_fields(missing_children) {
+                insertion.push_str(&render_schema_child_placeholder(&field, &self.newline));
+            }
+            insertions.push((prop.range_end, insertion));
+        }
         let mut missing = parsed_schema
             .public
             .fields
             .iter()
             .filter(|field| {
-                field.required && field.path.len() == 1 && parsed.find_path(&field.path).is_none()
+                field.path.len() == 1
+                    && parsed.find_path(&field.path).is_none()
+                    && (field.required || parsed_schema.has_required_child(&field.path[0]))
             })
             .cloned()
             .collect::<Vec<_>>();
-        missing.sort_by_key(|field| field.order.unwrap_or(i64::MAX));
-        if missing.is_empty() {
-            return Ok(FmMutation { output });
+        missing = sorted_schema_fields(missing);
+        if !missing.is_empty() {
+            let mut insertion = String::new();
+            for field in missing {
+                insertion.push_str(&render_schema_top_placeholder(
+                    &field,
+                    &parsed_schema,
+                    &self.newline,
+                ));
+            }
+            insertions.push((block.content_end, insertion));
         }
-        let mut insertion = String::new();
-        for field in missing {
-            insertion.push_str(&render_schema_placeholder(&field, &self.newline));
+        if insertions.is_empty() {
+            return self.checked_fm_output(self.source.clone());
         }
-        output.replace_range(block.content_end..block.content_end, &insertion);
-        Ok(FmMutation {
-            output: ensure_final_newline(output, &self.newline),
-        })
+        let mut output = self.source.clone();
+        insertions.sort_by_key(|(insert_at, _)| *insert_at);
+        for (insert_at, insertion) in insertions.into_iter().rev() {
+            output.replace_range(insert_at..insert_at, &insertion);
+        }
+        self.checked_fm_output(ensure_final_newline(output, &self.newline))
     }
 
     fn ensure_mutable_block(&self, create: bool) -> Result<Option<FmBlock>, AimdError> {
@@ -382,6 +577,7 @@ impl Document {
             return Err(fm_error("malformed_frontmatter"));
         }
         if let Some(block) = self.fm_block()? {
+            validate_existing_frontmatter_mutable(&self.source, &block)?;
             return Ok(Some(block));
         }
         if create {
@@ -396,9 +592,11 @@ impl Document {
         if self.frontmatter.malformed {
             return Err(fm_error("malformed_frontmatter"));
         }
-        self.fm_block()?.ok_or_else(|| {
+        let block = self.fm_block()?.ok_or_else(|| {
             fm_error("frontmatter_missing").hint("Use --create when setting a value.")
-        })
+        })?;
+        validate_existing_frontmatter_mutable(&self.source, &block)?;
+        Ok(block)
     }
 
     fn write_property(
@@ -409,6 +607,11 @@ impl Document {
         create: bool,
         schema: Option<&FmSchema>,
     ) -> Result<String, AimdError> {
+        if path.segments().len() > 2 {
+            return Err(fm_error("unsupported_frontmatter_path")
+                .selector(path.segments())
+                .hint("Nested frontmatter mutation is limited to top-level keys and direct child map keys."));
+        }
         let Some(block) = self.ensure_mutable_block(create)? else {
             return Ok(create_frontmatter(
                 &self.source,
@@ -470,6 +673,11 @@ impl Document {
         self.splice(insert_at, insert_at, rendered)
     }
 
+    fn checked_fm_output(&self, output: String) -> Result<FmMutation, AimdError> {
+        validate_frontmatter_yaml(&output)?;
+        Ok(FmMutation { output })
+    }
+
     fn fm_block(&self) -> Result<Option<FmBlock>, AimdError> {
         if !self.frontmatter.present || self.frontmatter.malformed {
             return Ok(None);
@@ -509,6 +717,35 @@ impl ParsedSchema {
             .map(|field| (field.path.clone(), field.clone()))
             .collect();
         Self { public, fields }
+    }
+
+    fn required_children(&self, parent: &str) -> Vec<FmSchemaField> {
+        sorted_schema_fields(
+            self.public
+                .fields
+                .iter()
+                .filter(|field| {
+                    field.required
+                        && field.path.len() == 2
+                        && field
+                            .path
+                            .first()
+                            .is_some_and(|path_parent| path_parent == parent)
+                })
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn has_required_child(&self, parent: &str) -> bool {
+        self.public.fields.iter().any(|field| {
+            field.required
+                && field.path.len() == 2
+                && field
+                    .path
+                    .first()
+                    .is_some_and(|path_parent| path_parent == parent)
+        })
     }
 }
 
@@ -661,10 +898,129 @@ fn parse_frontmatter_block(source: &str, block: &FmBlock) -> ParsedFrontmatter {
         }
         let nested = &lines[index + 1..end_index];
         let prop = parse_prop(key, inline, line, nested, end_index, &lines, block);
+        let mut child_keys = BTreeSet::new();
+        for child in &prop.children {
+            if !child_keys.insert(child.key.clone()) {
+                diagnostics.push(diagnostic(
+                    "duplicate_frontmatter_key",
+                    "Duplicate nested frontmatter key.",
+                    Some(child.line_start),
+                    Some(vec![prop.key.clone(), child.key.clone()]),
+                    DiagnosticSeverity::Warning,
+                ));
+            }
+        }
         props.push(prop);
         index = end_index;
     }
     ParsedFrontmatter { props, diagnostics }
+}
+
+fn yaml_syntax_diagnostics(source: &str, block: &FmBlock) -> Vec<Diagnostic> {
+    let content = &source[block.content_start..block.content_end];
+    match YamlLoader::load_from_str(content) {
+        Ok(_) => Vec::new(),
+        Err(error) => {
+            let marker = error.marker();
+            vec![diagnostic(
+                "invalid_yaml_frontmatter",
+                &format!(
+                    "Frontmatter is not valid YAML at column {}: {}",
+                    marker.col(),
+                    error.info()
+                ),
+                Some(block.line_start + marker.line()),
+                None,
+                DiagnosticSeverity::Error,
+            )]
+        }
+    }
+}
+
+fn unsupported_construct_diagnostics(source: &str, block: &FmBlock) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let content = &source[block.content_start..block.content_end];
+    let mut line_number = block.line_start + 1;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let unsupported = if trimmed == "---" || trimmed == "..." {
+            Some(
+                "Multiple YAML documents are not supported for source-preserving frontmatter mutation.",
+            )
+        } else if trimmed.starts_with("? ") {
+            Some(
+                "Complex YAML mapping keys are not supported for source-preserving frontmatter mutation.",
+            )
+        } else if trimmed.starts_with("<<:") || trimmed.contains("\n<<:") {
+            Some("YAML merge keys are not supported for source-preserving frontmatter mutation.")
+        } else if has_multiline_scalar_indicator(trimmed) {
+            Some(
+                "Multiline YAML scalars are not supported for source-preserving frontmatter mutation.",
+            )
+        } else if has_anchor_alias_or_tag(trimmed) {
+            Some(
+                "YAML anchors, aliases, and tags are not supported for source-preserving frontmatter mutation.",
+            )
+        } else {
+            None
+        };
+        if let Some(message) = unsupported {
+            diagnostics.push(diagnostic(
+                "unsupported_yaml_construct",
+                message,
+                Some(line_number),
+                None,
+                DiagnosticSeverity::Warning,
+            ));
+        }
+        line_number += usize::from(line.ends_with('\n'));
+    }
+    diagnostics
+}
+
+fn has_multiline_scalar_indicator(trimmed: &str) -> bool {
+    trimmed
+        .split_once(':')
+        .is_some_and(|(_, value)| matches!(value.trim_start().chars().next(), Some('|' | '>')))
+}
+
+fn has_anchor_alias_or_tag(trimmed: &str) -> bool {
+    if trimmed.starts_with('!') {
+        return true;
+    }
+    let Some((_, value)) = trimmed.split_once(':') else {
+        return false;
+    };
+    matches!(value.trim_start().chars().next(), Some('&' | '*' | '!'))
+}
+
+fn validate_existing_frontmatter_mutable(source: &str, block: &FmBlock) -> Result<(), AimdError> {
+    let parsed = parse_frontmatter_block(source, block);
+    if let Some(diagnostic) = parsed
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "duplicate_frontmatter_key")
+    {
+        return Err(
+            fm_error_with_optional_line(&diagnostic.code, diagnostic.line)
+                .hint("Duplicate frontmatter keys are not safe to rewrite source-preservingly."),
+        );
+    }
+    if let Some(diagnostic) = yaml_syntax_diagnostics(source, block).into_iter().next() {
+        return Err(fm_error_with_optional_line(
+            &diagnostic.code,
+            diagnostic.line,
+        ));
+    }
+    if let Some(diagnostic) = unsupported_construct_diagnostics(source, block)
+        .into_iter()
+        .next()
+    {
+        return Err(
+            fm_error_with_optional_line(&diagnostic.code, diagnostic.line).hint(diagnostic.message),
+        );
+    }
+    Ok(())
 }
 
 fn parse_prop(
@@ -674,35 +1030,15 @@ fn parse_prop(
     nested: &[FmLine<'_>],
     end_index: usize,
     lines: &[FmLine<'_>],
-    block: &FmBlock,
+    _block: &FmBlock,
 ) -> Prop {
-    let range_end = lines
-        .get(end_index)
-        .map_or(block.content_end, |next| next.start);
+    let range_end = prop_range_end(line, nested);
     if inline.trim().is_empty() {
         if nested
             .iter()
             .any(|line| line.text.trim_start().starts_with("- "))
         {
-            let items = nested
-                .iter()
-                .filter_map(|line| {
-                    let text = line.text.trim_start();
-                    text.strip_prefix("- ").map(|value| ListItem {
-                        value: parse_scalar(value.trim())
-                            .0
-                            .as_str()
-                            .unwrap_or(value.trim())
-                            .to_string(),
-                        range_start: line.start,
-                        range_end: line.end,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let values = items
-                .iter()
-                .map(|item| Value::String(item.value.clone()))
-                .collect::<Vec<_>>();
+            let (items, values) = parse_list_items(nested);
             return Prop {
                 key: key.to_string(),
                 range_start: line.start,
@@ -782,6 +1118,7 @@ fn parse_prop(
         };
     }
     if let Some(values) = parse_inline_list(inline.trim()) {
+        let values = values.into_iter().map(Value::String).collect::<Vec<_>>();
         return Prop {
             key: key.to_string(),
             range_start: line.start,
@@ -789,7 +1126,7 @@ fn parse_prop(
             line_start: line.number,
             line_end: line.number,
             kind: FmValueKind::List,
-            value: Value::Array(values.into_iter().map(Value::String).collect()),
+            value: Value::Array(values),
             children: Vec::new(),
             list_items: Vec::new(),
             flow_map: false,
@@ -810,13 +1147,69 @@ fn parse_prop(
     }
 }
 
+fn prop_range_end(line: &FmLine<'_>, nested: &[FmLine<'_>]) -> usize {
+    nested
+        .iter()
+        .rev()
+        .find(|line| !line.text.trim().is_empty() && !line.text.trim_start().starts_with('#'))
+        .map_or(line.end, |line| line.end)
+}
+
+fn parse_list_items(nested: &[FmLine<'_>]) -> (Vec<ListItem>, Vec<Value>) {
+    let mut scalar_items = Vec::new();
+    let mut values = Vec::new();
+    let mut index = 0;
+    while index < nested.len() {
+        let line = &nested[index];
+        let text = line.text.trim_start();
+        let Some(item_text) = text.strip_prefix("- ") else {
+            index += 1;
+            continue;
+        };
+        if let Some((key, value)) = split_key_value(item_text) {
+            let mut map = Map::new();
+            map.insert(key.to_string(), parse_value(value.trim()));
+            index += 1;
+            while index < nested.len() {
+                let child_line = &nested[index];
+                let child_text = child_line.text.strip_prefix("    ");
+                if child_line.text.trim_start().starts_with("- ") {
+                    break;
+                }
+                if let Some(child_text) = child_text
+                    && let Some((child_key, child_value)) = split_key_value(child_text)
+                {
+                    map.insert(child_key.to_string(), parse_value(child_value.trim()));
+                }
+                index += 1;
+            }
+            values.push(Value::Object(map));
+            continue;
+        }
+        let value = parse_scalar(item_text.trim())
+            .0
+            .as_str()
+            .unwrap_or(item_text.trim())
+            .to_string();
+        scalar_items.push(ListItem {
+            value: value.clone(),
+            range_start: line.start,
+            range_end: line.end,
+        });
+        values.push(Value::String(value));
+        index += 1;
+    }
+    (scalar_items, values)
+}
+
 fn parse_child(line: &FmLine<'_>) -> Option<Child> {
     let text = line.text.strip_prefix("  ")?;
     if text.starts_with(' ') || text.trim_start().starts_with("- ") {
         return None;
     }
     let (key, value) = split_key_value(text)?;
-    let (value, kind) = parse_scalar(value.trim());
+    let value = parse_value(value.trim());
+    let kind = kind_for_value(&value);
     Some(Child {
         key: key.to_string(),
         range_start: line.start,
@@ -917,7 +1310,20 @@ fn parse_inline_list(value: &str) -> Option<Vec<String>> {
     )
 }
 
+fn parse_value(value: &str) -> Value {
+    if let Some(values) = parse_inline_list(value) {
+        return Value::Array(values.into_iter().map(Value::String).collect());
+    }
+    if let Some(map) = parse_flow_map(value) {
+        return Value::Object(map);
+    }
+    parse_scalar(value).0
+}
+
 fn render_set_value(key: &str, value: &FmSetValue, newline: &str) -> Result<String, AimdError> {
+    if let FmSetValue::List(values) = value {
+        return Ok(render_list(key, values, newline));
+    }
     if let FmSetValue::Map(value) = value {
         let object = value.as_object().ok_or_else(|| {
             fm_error("invalid_frontmatter_value").hint("--map expects a YAML or JSON object.")
@@ -936,6 +1342,9 @@ fn render_set_value(key: &str, value: &FmSetValue, newline: &str) -> Result<Stri
 }
 
 fn render_list(key: &str, values: &[String], newline: &str) -> String {
+    if values.is_empty() {
+        return format!("{key}: []{newline}");
+    }
     let mut output = format!("{key}:{newline}");
     for value in values {
         output.push_str("  - ");
@@ -954,8 +1363,21 @@ fn render_inline_value(value: &FmSetValue) -> String {
         FmSetValue::Date(value) => value.to_string(),
         FmSetValue::Blank => String::new(),
         FmSetValue::Null => "null".to_string(),
+        FmSetValue::List(values) => render_inline_list(values),
         FmSetValue::Map(value) => render_json_inline_value(value),
     }
+}
+
+fn render_inline_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+    let rendered = values
+        .iter()
+        .map(|value| quote_yaml_string(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{rendered}]")
 }
 
 fn render_json_inline_value(value: &Value) -> String {
@@ -964,23 +1386,84 @@ fn render_json_inline_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => quote_yaml_string(value),
-        _ => quote_yaml_string(&value.to_string()),
+        Value::Array(values) => {
+            let rendered = values
+                .iter()
+                .map(render_json_inline_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
+        Value::Object(values) => {
+            let rendered = values
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", render_json_inline_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {rendered} }}")
+        }
     }
 }
 
+fn render_child_list_line(key: &str, values: &[String], newline: &str) -> String {
+    format!("  {key}: {}{newline}", render_inline_list(values))
+}
+
+fn child_list_strings(child: &Child, path: &PropertyPath) -> Result<Vec<String>, AimdError> {
+    child
+        .value
+        .as_array()
+        .ok_or_else(|| fm_error("unsupported_frontmatter_path").selector(path.segments()))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| fm_error("unsupported_frontmatter_path").selector(path.segments()))
+        })
+        .collect()
+}
+
 fn quote_yaml_string(value: &str) -> String {
-    if value.is_empty()
-        || value != value.trim()
+    if yaml_plain_scalar_needs_quotes(value) {
+        serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+    } else {
+        value.to_string()
+    }
+}
+
+fn yaml_plain_scalar_needs_quotes(value: &str) -> bool {
+    let Some(first) = value.chars().next() else {
+        return true;
+    };
+    let starts_like_collection_item = value
+        .strip_prefix(['-', '?'])
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+    value != value.trim()
+        || value.chars().any(char::is_control)
         || value.contains(':')
         || value.contains('#')
         || value.contains("[[")
         || matches!(value, "true" | "false" | "null" | "~")
         || looks_like_date(value)
-    {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
+        || starts_like_collection_item
+        || matches!(
+            first,
+            '!' | '&'
+                | '*'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | ','
+                | '|'
+                | '>'
+                | '@'
+                | '`'
+                | '"'
+                | '\''
+                | '%'
+        )
 }
 
 fn strip_yaml_quotes(value: &str) -> String {
@@ -1105,6 +1588,8 @@ fn parse_kind(value: &str) -> FmValueKind {
         "float" => FmValueKind::Float,
         "bool" => FmValueKind::Bool,
         "date" => FmValueKind::Date,
+        "blank" => FmValueKind::Blank,
+        "null" => FmValueKind::Null,
         "list" => FmValueKind::List,
         "map" => FmValueKind::Map,
         _ => FmValueKind::Any,
@@ -1116,6 +1601,24 @@ fn schema_diagnostics(parsed: &ParsedFrontmatter, schema: &FmSchema) -> Vec<Diag
     let mut diagnostics = Vec::new();
     for field in schema.fields.values() {
         match parsed.find_path(&field.path) {
+            Some(FmValueKind::Null) if field.kind == FmValueKind::Blank => {
+                diagnostics.push(diagnostic(
+                    "frontmatter_unexpected_null",
+                    "Frontmatter property is null where schema expects blank.",
+                    None,
+                    Some(field.path.clone()),
+                    DiagnosticSeverity::Warning,
+                ))
+            }
+            Some(FmValueKind::Blank) if field.kind == FmValueKind::Null => {
+                diagnostics.push(diagnostic(
+                    "frontmatter_blank_null_mismatch",
+                    "Frontmatter property is blank where schema expects null.",
+                    None,
+                    Some(field.path.clone()),
+                    DiagnosticSeverity::Warning,
+                ))
+            }
             Some(kind) if field.kind != FmValueKind::Any && kind != field.kind => {
                 diagnostics.push(diagnostic(
                     "frontmatter_schema_type_mismatch",
@@ -1188,11 +1691,41 @@ fn insertion_byte(
     None
 }
 
-fn render_schema_placeholder(field: &FmSchemaField, newline: &str) -> String {
+fn sorted_schema_fields(mut fields: Vec<FmSchemaField>) -> Vec<FmSchemaField> {
+    fields.sort_by_key(|field| field.order.unwrap_or(i64::MAX));
+    fields
+}
+
+fn render_schema_top_placeholder(
+    field: &FmSchemaField,
+    schema: &ParsedSchema,
+    newline: &str,
+) -> String {
     let key = field.path.last().cloned().unwrap_or_default();
-    match field.kind {
-        FmValueKind::List => format!("{key}:{newline}"),
-        FmValueKind::Map => format!("{key}:{newline}"),
+    if field.kind == FmValueKind::Map {
+        let children = schema.required_children(&key);
+        if children.is_empty() {
+            return format!("{key}: {{}}{newline}");
+        }
+        let mut output = format!("{key}:{newline}");
+        for child in children {
+            output.push_str(&render_schema_child_placeholder(&child, newline));
+        }
+        return output;
+    }
+    render_schema_scalar_placeholder(&key, field.kind, newline)
+}
+
+fn render_schema_child_placeholder(field: &FmSchemaField, newline: &str) -> String {
+    let key = field.path.last().cloned().unwrap_or_default();
+    let rendered = render_schema_scalar_placeholder(&key, field.kind, newline);
+    format!("  {rendered}")
+}
+
+fn render_schema_scalar_placeholder(key: &str, kind: FmValueKind, newline: &str) -> String {
+    match kind {
+        FmValueKind::List => format!("{key}: []{newline}"),
+        FmValueKind::Map => format!("{key}: {{}}{newline}"),
         FmValueKind::Bool => format!("{key}: false{newline}"),
         FmValueKind::Int => format!("{key}: 0{newline}"),
         FmValueKind::Float => format!("{key}: 0.0{newline}"),
@@ -1211,6 +1744,29 @@ fn create_frontmatter(source: &str, rendered: &str, newline: &str) -> String {
     output.push_str(newline);
     output.push_str(source);
     ensure_final_newline(output, newline)
+}
+
+fn validate_frontmatter_yaml(source: &str) -> Result<(), AimdError> {
+    let document = Document::parse(source);
+    if document.frontmatter.malformed {
+        return Err(fm_error("malformed_frontmatter"));
+    }
+    let Some(block) = document.fm_block()? else {
+        return Ok(());
+    };
+    let content = &source[block.content_start..block.content_end];
+    YamlLoader::load_from_str(content)
+        .map(|_| ())
+        .map_err(|error| {
+            let marker = error.marker();
+            fm_error("invalid_yaml_frontmatter")
+                .line(block.line_start + marker.line())
+                .hint(format!(
+                    "Generated frontmatter is not valid YAML at column {}: {}",
+                    marker.col(),
+                    error.info()
+                ))
+        })
 }
 
 fn ensure_final_newline(mut output: String, newline: &str) -> String {
@@ -1243,5 +1799,13 @@ fn fm_error(code: &str) -> AimdError {
         line: None,
         hint: None,
         matches: Vec::new(),
+    }
+}
+
+fn fm_error_with_optional_line(code: &str, line: Option<usize>) -> AimdError {
+    let error = fm_error(code);
+    match line {
+        Some(line) => error.line(line),
+        None => error,
     }
 }

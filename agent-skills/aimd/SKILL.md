@@ -102,7 +102,7 @@ aimd fm append-list-item docs/project.md ib_challenges "[[Backlog Blitz v3]]" --
 aimd fm remove-list-item docs/project.md ib_challenges "[[Old Challenge]]" --dry-run
 ```
 
-Use `set-list` to replace the whole list. Use `append-list-item` and `remove-list-item` to add or remove matching list values.
+Use `set-list` to replace the whole list. Use `append-list-item` and `remove-list-item` to add or remove matching list values. Appends avoid duplicates by default unless `--allow-duplicate` is supplied. Removal deletes all matching scalar values from a supported list.
 
 Check and normalize with a schema:
 
@@ -112,6 +112,8 @@ aimd fm normalize docs/project.md --schema schemas/game-note.yaml --dry-run
 ```
 
 Flow-style YAML maps can be read and checked, but nested flow-map mutation may fail with `unsafe_frontmatter_rewrite`. Replace the whole map with `--map-file` when that is intentional.
+
+`aimd fm` validates generated frontmatter as YAML before writing. It preserves unrelated body bytes, comments, blank lines, ordering, CRLF line endings, and final-newline policy where the supported source-range model can prove the edit. Schema normalization inserts required lists as `[]`, required maps as `{}` or block maps with required child placeholders, and scalar defaults conservatively. It can read and preserve sequence-of-maps shapes, including inline empty lists like `evidence: []`, but it does not support mutation paths inside nested sequences. Avoid editing frontmatter with anchors, aliases, merge keys, custom tags, complex keys, multiline scalars, duplicate keys, or multiple YAML document markers; mutating commands should refuse those with stable diagnostics instead of rewriting them.
 
 ## Synthetic Example Shape
 
@@ -148,6 +150,10 @@ Never use private notes, account data, proprietary documentation, personal logs,
 - `frontmatter_property_not_found`: run `aimd fm get <file> --json` and select an existing property path, or use `--create` on supported writes.
 - `frontmatter_schema_type_mismatch`: change the command/value type or update the schema before writing.
 - `invalid_frontmatter_value`: provide a scalar/list/map value matching the command shape.
+- `invalid_yaml_frontmatter`: fix the existing frontmatter syntax before attempting a mutation; writes are blocked.
+- `unsupported_yaml_construct`: preserve the file and edit manually or simplify the YAML shape before using `aimd fm` mutation commands.
+- `unsupported_frontmatter_path`: select a supported top-level key or direct child map key; nested sequence item mutation is intentionally refused.
+- `duplicate_frontmatter_key`: remove or reconcile duplicate keys before mutating frontmatter.
 - `unsafe_rewrite`, `parse_error`, or `io_error`: stop, preserve the file, and inspect diagnostics before retrying.
 
 ## Review Step
